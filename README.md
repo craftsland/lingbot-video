@@ -1,6 +1,6 @@
 # LingBot-Video
 
-**🌐 [Project Page](https://technology.robbyant.com/lingbot-video)** | **🤗 [Hugging Face](https://huggingface.co/collections/robbyant/lingbot-video)** | **🤖 [ModelScope](https://www.modelscope.cn/collections/Robbyant/LingBot-Video)** | **📄 [Paper](https://github.com/Robbyant/lingbot-video/blob/main/paper.pdf)** | **⚖️ [License](LICENSE)**
+**🌐 [Project Page](https://technology.robbyant.com/lingbot-video)** | **🤗 [Hugging Face](https://huggingface.co/collections/robbyant/lingbot-video)** | **🤖 [ModelScope](https://www.modelscope.cn/collections/Robbyant/LingBot-Video)** | **📄 [Paper](https://arxiv.org/abs/2607.07675)** | **⚖️ [License](LICENSE)**
 
 **📘 English Usage**: [English Documentation](docs/en/index.md) \
 **📕 中文使用文档**: [中文文档](docs/zh/index.md)
@@ -270,7 +270,7 @@ If you find this work useful for your research, please cite our paper:
 @article{lingbot-video,
   title = {Scaling Mixture-of-Experts Video Pretraining for Embodied Intelligence},
   author = {Shuailei Ma and Jiaqi Liao and Xinyang Wang and Jingjing Wang and Chaoran Feng and Zijing Hu and Chong Bao and Zichen Xi and Yuqi Gan and Weisen Wang and Yanhong Zeng and Qin Zhao and Zifan Shi and Wei Wu and Hao Ouyang and Qiuyu Wang and Shangzhan Zhang and Jiahao Shao and Yipengjing Sun and Liangxiao Hu and Lunke Pan and Nan Xue and Kecheng Zheng and Yinghao Xu and Xing Zhu and Yujun Shen and Ka Leong Cheng},
-  journal={arXiv preprint arXiv:2607.xxxxx},
+  journal={arXiv preprint arXiv:2607.07675},
   year = {2026}
 }
 ```
