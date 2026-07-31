@@ -1,5 +1,7 @@
 import math
 import os
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Optional, Tuple
 
 import torch
@@ -78,6 +80,25 @@ def _moe_reorder_backend() -> str:
 
 def _moe_restore_backend() -> str:
     return os.environ.get("LINGBOT_MOE_RESTORE_BACKEND", "scatter").lower().strip()
+
+
+_ROUTER_TARGET_M: ContextVar[Optional[int]] = ContextVar(
+    "lingbot_router_target_m",
+    default=None,
+)
+
+
+def _current_router_target_m() -> int | None:
+    return _ROUTER_TARGET_M.get()
+
+
+@contextmanager
+def _router_target_m_scope(target_m: int | None):
+    token = _ROUTER_TARGET_M.set(target_m)
+    try:
+        yield
+    finally:
+        _ROUTER_TARGET_M.reset(token)
 
 
 def _all_to_all_split_cat(
@@ -366,9 +387,30 @@ class LingBotVideoRouter(nn.Module):
         masked = scores_for_choice.masked_fill(~score_mask.bool(), float("-inf"))
         return torch.topk(masked, k=self.top_k, dim=-1, sorted=False)[1]
 
+    @staticmethod
+    def _pad_to_m_linear(tokens: torch.Tensor, weight: torch.Tensor, target_m: int) -> torch.Tensor:
+        seq_len = int(tokens.shape[0])
+        if target_m < seq_len:
+            raise ValueError(f"router target_m={target_m} is smaller than seq_len={seq_len}")
+        if seq_len == 0 or target_m == seq_len:
+            return F.linear(tokens, weight)
+        padded = torch.zeros(
+            target_m,
+            tokens.shape[-1],
+            device=tokens.device,
+            dtype=tokens.dtype,
+        )
+        padded[:seq_len] = tokens
+        return F.linear(padded, weight)[:seq_len]
+
     def forward(self, tokens: torch.Tensor):
         with torch.amp.autocast(tokens.device.type, enabled=False):
-            logits = F.linear(tokens.float(), self.weight.float())
+            tokens_f = tokens.float()
+            weight_f = self.weight.float()
+            if (target_m := _current_router_target_m()) is not None:
+                logits = self._pad_to_m_linear(tokens_f, weight_f, target_m)
+            else:
+                logits = F.linear(tokens_f, weight_f)
         if self.score_func == "softmax":
             scores = F.softmax(logits, dim=-1)
         else:
@@ -403,10 +445,11 @@ def _round_up_to_multiple(value: int, multiple: int) -> int:
 class LingBotVideoSparseMoeBlock(nn.Module):
     def __init__(self, hidden_size, intermediate_size, num_experts, top_k,
                  moe_intermediate_size, score_func, norm_topk_prob, n_group, topk_group,
-                 routed_scaling_factor, n_shared_experts):
+                 routed_scaling_factor, n_shared_experts, layer_idx: int = -1):
         super().__init__()
         self.hidden_size = hidden_size
         self.num_experts = num_experts
+        self.layer_idx = layer_idx
         self.router = LingBotVideoRouter(
             hidden_size, num_experts, top_k, score_func, norm_topk_prob,
             n_group, topk_group, routed_scaling_factor,
@@ -852,7 +895,6 @@ class LingBotVideoSparseMoeBlock(nn.Module):
         return out.to(expert_output.dtype)
 
     def forward(self, hidden_states: torch.Tensor, padding_mask: Optional[torch.Tensor] = None):
-        # hidden_states: (B, S, H); padding_mask: (B*S,) with 1=valid (only needed when B>1)
         B = hidden_states.shape[0]
         tokens = hidden_states.view(-1, self.hidden_size)
         top_indices, top_scores, logits, scores, scores_for_choice = self.router(tokens)
@@ -913,6 +955,7 @@ class LingBotVideoBlock(nn.Module):
                 moe_intermediate_size, score_func, norm_topk_prob,
                 n_group, topk_group, routed_scaling_factor,
                 n_shared_experts,
+                layer_idx=layer_idx,
             )
         else:
             self.ffn = LingBotVideoMLP(h, intermediate_size)
@@ -934,16 +977,11 @@ class LingBotVideoBlock(nn.Module):
                 "LingBotVideoBlock expects token-level temb6 with shape "
                 f"(B*S, 6D); got {tuple(temb6.shape)} for hidden states {tuple(x.shape)}."
             )
-        # AdaLN mod: dense and MoE both keep scale_shift_table fp32 (master
-        # moe/models.py:80 dropped the accidental `.to(dtype=c.dtype)` cast).
         mod = temb6.view(x.shape[0], x.shape[1], -1) + self.scale_shift_table.unsqueeze(0)
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = mod.chunk(6, dim=-1)
         gate_msa, gate_mlp = gate_msa.tanh(), gate_mlp.tanh()
         scale_msa, scale_mlp = 1.0 + scale_msa, 1.0 + scale_mlp
 
-        # AdaLN modulation / norms run in fp32 (sensitive path); cast to the bulk
-        # compute dtype only at the bf16 Linear boundary. This replaces the old
-        # ambient autocast, which rounded Linear inputs to bf16 at the same point.
         bulk_dtype = self.attn.to_q.weight.dtype
         attn_in = (self.norm1(x) * scale_msa + shift_msa).to(bulk_dtype)
         attn_out = self.attn(
@@ -1265,6 +1303,8 @@ class LingBotVideoTransformer3DModel(ModelMixin, ConfigMixin):
             temb6 = self.time_modulation(temb_input.reshape(B * joint_seq_len, -1))
             temb6 = temb6.reshape(B, joint_seq_len, -1)                        # (B, S, 6D)
 
+        router_target_m = int(joint.shape[0]) * int(joint.shape[1]) if packed_cp else None
+
         joint = self.cp_joint(joint)
         rotary = self.cp_rotary(rotary)
         if packed_cp:
@@ -1272,16 +1312,17 @@ class LingBotVideoTransformer3DModel(ModelMixin, ConfigMixin):
         temb6 = self.cp_temb6(temb6)
         temb6 = temb6.reshape(temb6.shape[0] * temb6.shape[1], -1)
 
-        for block in self.blocks:
-            joint = block(
-                joint,
-                temb6,
-                rotary,
-                attention_mask,
-                moe_padding_mask,
-                packed_indices=packed_indices,
-                parallel_config=parallel_config,
-            )
+        with _router_target_m_scope(router_target_m):
+            for block in self.blocks:
+                joint = block(
+                    joint,
+                    temb6,
+                    rotary,
+                    attention_mask,
+                    moe_padding_mask,
+                    packed_indices=packed_indices,
+                    parallel_config=parallel_config,
+                )
         if not packed_cp:
             joint = self.cp_out(joint)
 

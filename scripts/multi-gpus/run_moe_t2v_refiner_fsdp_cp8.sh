@@ -32,6 +32,10 @@ SHIFT="${SHIFT:-3}"
 REFINER_SHIFT="${REFINER_SHIFT:-3}"
 REFINER_T_THRESH="${REFINER_T_THRESH:-0.85}"
 REFINER_SIGMA_TAIL_STEPS="${REFINER_SIGMA_TAIL_STEPS:-2}"
+REFINER_VAE_TILE_HEIGHT="${REFINER_VAE_TILE_HEIGHT:-384}"
+REFINER_VAE_TILE_WIDTH="${REFINER_VAE_TILE_WIDTH:-640}"
+REFINER_VAE_TILE_STRIDE_HEIGHT="${REFINER_VAE_TILE_STRIDE_HEIGHT:-288}"
+REFINER_VAE_TILE_STRIDE_WIDTH="${REFINER_VAE_TILE_STRIDE_WIDTH:-480}"
 SEED="${SEED:-42}"
 FPS="${FPS:-24}"
 
@@ -74,11 +78,15 @@ mkdir -p "$OUT_DIR"
   --text_encoder_dtype bf16 \
   --vae_dtype fp32 \
   --refiner_vae_dtype fp32 \
+  --refiner_vae_tiling \
+  --refiner_vae_tile_height "$REFINER_VAE_TILE_HEIGHT" \
+  --refiner_vae_tile_width "$REFINER_VAE_TILE_WIDTH" \
+  --refiner_vae_tile_stride_height "$REFINER_VAE_TILE_STRIDE_HEIGHT" \
+  --refiner_vae_tile_stride_width "$REFINER_VAE_TILE_STRIDE_WIDTH" \
   --context_parallel_degree "$CP" \
   --context_parallel_ulysses_anything \
   --enable_fsdp_inference \
-  --batch_cfg \
-  --refiner_batch_cfg \
+  --release_base_before_refiner \
   --reuse_condition_features
 
 echo "Saved: $OUT_DIR/t2v_base.mp4"

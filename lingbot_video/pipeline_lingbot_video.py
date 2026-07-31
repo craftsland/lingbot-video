@@ -83,6 +83,35 @@ def _module_device(module: torch.nn.Module) -> torch.device:
         return torch.device("cpu")
 
 
+def _disable_unused_vlm_lm_head(text_encoder: torch.nn.Module) -> bool:
+    lm_head = getattr(text_encoder, "lm_head", None)
+    if not isinstance(lm_head, torch.nn.Module) or isinstance(lm_head, torch.nn.Identity):
+        return False
+    text_encoder.lm_head = torch.nn.Identity()
+    return True
+
+
+def _run_vlm_encoder(text_encoder: torch.nn.Module, **inputs: Any) -> Any:
+    encoder = getattr(text_encoder, "model", None)
+    if not isinstance(encoder, torch.nn.Module):
+        raise TypeError(
+            f"{type(text_encoder).__name__} does not expose a torch.nn.Module encoder core."
+        )
+    return encoder(**inputs)
+
+
+def _select_vlm_hidden_state(outputs: Any, hidden_state_skip_layer: int | None) -> torch.Tensor:
+    if hidden_state_skip_layer in (None, 0):
+        return outputs.last_hidden_state
+    hidden_states = getattr(outputs, "hidden_states", None)
+    if hidden_states is None:
+        raise RuntimeError(
+            "The VLM encoder did not return hidden-state history for "
+            f"hidden_state_skip_layer={hidden_state_skip_layer}."
+        )
+    return hidden_states[-(hidden_state_skip_layer + 1)]
+
+
 def _group_global_rank(group: Optional[Any], group_rank: int) -> int:
     if group is None:
         return group_rank
@@ -118,6 +147,7 @@ class LingBotVideoPipeline(DiffusionPipeline):
             processor=processor,
             scheduler=scheduler,
         )
+        _disable_unused_vlm_lm_head(self.text_encoder)
         self.vae_scale_factor_temporal = 4
         self.vae_scale_factor_spatial = 8
         self.token_length = TOKEN_LENGTH
@@ -222,14 +252,12 @@ class LingBotVideoPipeline(DiffusionPipeline):
             video_kwargs=video_kwargs,
         )
         inputs = inputs.to(device)
-        outputs = self.text_encoder(
+        outputs = _run_vlm_encoder(
+            self.text_encoder,
             **inputs,
-            output_hidden_states=self.hidden_state_skip_layer is not None,
+            output_hidden_states=bool(self.hidden_state_skip_layer),
         )
-        if self.hidden_state_skip_layer is not None:
-            prompt_embeds = outputs.hidden_states[-(self.hidden_state_skip_layer + 1)]
-        else:
-            prompt_embeds = outputs.last_hidden_state
+        prompt_embeds = _select_vlm_hidden_state(outputs, self.hidden_state_skip_layer)
 
         prompt_mask = inputs["attention_mask"]
         crop_start = self._compute_crop_start()
@@ -486,11 +514,9 @@ class LingBotVideoPipeline(DiffusionPipeline):
                 if cfg_parallel_rank == 0:
                     branch_embeds = prompt_embeds
                     branch_mask = prompt_mask
-                    branch_name = "transformer.cond"
                 else:
                     branch_embeds = negative_embeds
                     branch_mask = negative_mask
-                    branch_name = "transformer.uncond"
                 branch_model_input = branch_embeds.to(transformer_dtype)
                 with _transformer_autocast(device, transformer_dtype):
                     branch_noise_pred = self.transformer(

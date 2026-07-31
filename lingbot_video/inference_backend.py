@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import importlib.util
 import json
 import sys
@@ -42,9 +43,10 @@ def sglang_native_available() -> bool:
     if not _module_available("sglang"):
         return False
     try:
-        from lingbot_video.native_backend import LingBotVideoNativePipeline
+        native_backend = importlib.import_module("lingbot_video.native_backend")
     except Exception:
         return False
+    LingBotVideoNativePipeline = getattr(native_backend, "LingBotVideoNativePipeline", None)
     return LingBotVideoNativePipeline is not None
 
 

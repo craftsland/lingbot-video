@@ -53,7 +53,6 @@ mkdir -p "$OUT_DIR"
   --fps "$FPS" \
   --transformer_dtype bf16 \
   --text_encoder_dtype bf16 \
-  --vae_dtype fp32 \
-  --batch_cfg
+  --vae_dtype fp32
 
 echo "Saved: $OUT_DIR/t2i.png"

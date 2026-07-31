@@ -9,6 +9,12 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 
+try:
+    from decord import VideoReader, cpu as decord_cpu
+except Exception:  # pragma: no cover - optional video decoding dependency
+    VideoReader = None
+    decord_cpu = None
+
 LOW_NOISE_TAIL_V1_NAME = "low_noise_tail_v1"
 LOW_NOISE_TAIL_V1_DEFAULT_STEPS = 2
 
@@ -215,9 +221,9 @@ def load_refiner_video_tensor(
     vae_tc: int = 4,
     max_frames: int | None = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
-    from decord import VideoReader, cpu
-
-    vr = VideoReader(str(path), ctx=cpu(0))
+    if VideoReader is None or decord_cpu is None:
+        raise ImportError("decord is required to load refiner input videos")
+    vr = VideoReader(str(path), ctx=decord_cpu(0))
     total = len(vr)
     if total <= 0:
         raise ValueError(f"Video has no frames: {path}")

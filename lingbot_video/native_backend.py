@@ -34,6 +34,11 @@ except Exception:  # pragma: no cover - SGLang is an optional deployment dep
     ServerArgs = None
     set_global_server_args = None
 
+try:
+    from transformers import Qwen3VLForConditionalGeneration
+except Exception:  # pragma: no cover - deployment dependency guard
+    Qwen3VLForConditionalGeneration = None
+
 
 @dataclass
 class LingBotVideoNativePipelineConfig:
@@ -60,9 +65,7 @@ class LingBotVideoNativeSamplingParams:
 
 @contextmanager
 def _patch_qwen3vl_from_pretrained():
-    try:
-        from transformers import Qwen3VLForConditionalGeneration
-    except Exception:
+    if Qwen3VLForConditionalGeneration is None:
         yield
         return
 

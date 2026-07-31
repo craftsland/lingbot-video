@@ -65,11 +65,14 @@ export NPROC=$((CFG * CP))   # 要启动的进程数
 权重切到多个进程上时，添加 `--enable_fsdp_inference`。这个开关与 backend 无关：
 使用 `--backend sglang` 时，SGLang 负责 native 执行路径，PyTorch composable FSDP
 负责切分 DiT module。
+如需同时切分 Qwen3-VL，再添加 `--enable_vlm_fsdp_inference`。VLM 开关与 DiT
+开关相互独立，并复用同一个 distributed process mesh。
 
 FSDP 可以和上面的 SGLang 布局一起用：
 
 - 仅 CP：`--cfg_parallel_degree 1 --context_parallel_degree <GPU数>`。
-  如果希望使用 batched CFG，再添加 `--batch_cfg` 和 `--refiner_batch_cfg`。
+  预置脚本默认使用 sequential CFG；只有明确希望使用 batched CFG 时才添加
+  `--batch_cfg` 和 `--refiner_batch_cfg`。
 - CFG×CP：不要开启 `--batch_cfg` / `--refiner_batch_cfg`，设置
   `--cfg_parallel_degree 2 --context_parallel_degree <GPU数/2>`。
 - 只做 FSDP 显存切分：用 `torchrun --nproc_per_node <GPU数>` 启动，并保持两个
@@ -77,11 +80,14 @@ FSDP 可以和上面的 SGLang 布局一起用：
 
 当 `--run_refiner` 和 `--enable_fsdp_inference` 同时存在时，runner 会先加载
 base DiT 和 refiner DiT，然后在 base 采样开始前同时切分两个 DiT。运行日志会分别
-为 base 和 refiner 打印 `fsdp_inference=FSDPInferenceInfo(...)`。
+打印 `dit_fsdp_inference=FSDPInferenceInfo(...)` 和
+`vlm_fsdp_inference=VLMFSDPInferenceInfo(...)`。
 
 这里做的是 GPU 显存切分，不是 meta-init loader。初始化阶段每个 rank 仍会先在
 host memory 上构建一份 transformer，然后再做 FSDP 切分；大 MoE checkpoint 需要
 确保机器有足够系统内存支撑当前进程数。
+VLM FSDP 也有相同的 host memory 限制，详细实测见
+[推理性能与显存报告](performance_benchmark.md)。
 
 ## Dense 运行
 
@@ -152,8 +158,19 @@ torchrun --standalone --nproc_per_node $NPROC scripts/inference.py \
   --text_encoder_dtype bf16 \
   --vae_dtype fp32 \
   --refiner_vae_dtype fp32 \
+  --refiner_vae_tiling \
+  --refiner_vae_tile_height 384 \
+  --refiner_vae_tile_width 640 \
+  --refiner_vae_tile_stride_height 288 \
+  --refiner_vae_tile_stride_width 480 \
+  --release_base_before_refiner \
   --reuse_condition_features
 ```
+
+1080p refiner 输出默认开启 refiner VAE tiling，默认 tile 是 `384x640`、
+stride 是 `288x480`。显存充足、希望 VAE decode 更快时，可以用
+`--no-refiner_vae_tiling` 关闭。
+预置 refiner 脚本还会在进入 refiner 前释放 base pipeline，进一步降低峰值显存。
 
 ## MoE 运行 — 速度优先 FP8
 
@@ -179,6 +196,7 @@ FP8 MoE 可能改变相对于 grouped MoE 的生成细节。速度优先时使�
 | 默认 grouped experts | `LINGBOT_MOE_EXPERT_BACKEND=grouped_mm` |
 | 快速看效果 | `LINGBOT_MOE_EXPERT_BACKEND=sglang_triton_fp8` |
 | DiT 显存切分 | 添加 `--enable_fsdp_inference` |
+| VLM 显存切分 | 添加 `--enable_vlm_fsdp_inference` |
 
 GPU 布局(CFG×CP / 仅 CP)见上文「GPU 布局」章节。
 

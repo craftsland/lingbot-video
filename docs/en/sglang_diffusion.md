@@ -70,11 +70,14 @@ Add `--enable_fsdp_inference` when you want to keep the base DiT and refiner
 DiT loaded together while sharding their transformer weights across the launched
 processes. This flag is backend-agnostic: with `--backend sglang`, SGLang owns
 the native execution path while PyTorch composable FSDP shards the DiT modules.
+Add `--enable_vlm_fsdp_inference` when Qwen3-VL should also be sharded. The VLM
+flag is independent of the DiT flag and uses the same distributed process mesh.
 
 FSDP can be combined with the SGLang layouts above:
 
 - CP-only: `--cfg_parallel_degree 1 --context_parallel_degree <GPU_COUNT>`.
-  Add `--batch_cfg` and `--refiner_batch_cfg` when you want batched CFG.
+  The provided scripts use sequential CFG by default; add `--batch_cfg` and
+  `--refiner_batch_cfg` only when you explicitly want batched CFG.
 - CFG×CP: keep `--batch_cfg` and `--refiner_batch_cfg` off, then set
   `--cfg_parallel_degree 2 --context_parallel_degree <GPU_COUNT/2>`.
 - FSDP-only memory sharding: launch with `torchrun --nproc_per_node <GPU_COUNT>`
@@ -83,11 +86,14 @@ FSDP can be combined with the SGLang layouts above:
 When `--run_refiner` and `--enable_fsdp_inference` are both present, the runner
 loads the base DiT and refiner DiT first, then shards both before base sampling
 starts. The runtime logs include separate base and refiner
-`fsdp_inference=FSDPInferenceInfo(...)` fields.
+`dit_fsdp_inference=FSDPInferenceInfo(...)` and
+`vlm_fsdp_inference=VLMFSDPInferenceInfo(...)` fields.
 
 This is GPU memory sharding, not a meta-init loader. During initialization, each
 rank still constructs the transformer on host memory before FSDP sharding, so
 large MoE checkpoints require enough system RAM for the chosen process count.
+VLM FSDP has the same host-memory limitation. Its measured trade-offs are
+included in the [inference performance benchmark](performance_benchmark.md).
 
 ## Dense Run
 
@@ -160,8 +166,20 @@ torchrun --standalone --nproc_per_node $NPROC scripts/inference.py \
   --text_encoder_dtype bf16 \
   --vae_dtype fp32 \
   --refiner_vae_dtype fp32 \
+  --refiner_vae_tiling \
+  --refiner_vae_tile_height 384 \
+  --refiner_vae_tile_width 640 \
+  --refiner_vae_tile_stride_height 288 \
+  --refiner_vae_tile_stride_width 480 \
+  --release_base_before_refiner \
   --reuse_condition_features
 ```
+
+For 1080p refiner output, refiner VAE tiling is enabled by default with
+`384x640` tiles and `288x480` strides. Use `--no-refiner_vae_tiling` only when
+decode memory is already comfortable and you prefer faster VAE decode.
+The provided refiner scripts also release the base pipeline before refiner
+execution to reduce peak memory.
 
 ## MoE Run — Speed-First FP8
 
@@ -188,6 +206,7 @@ matters more than strict numerical reproducibility.
 | Default grouped experts | `LINGBOT_MOE_EXPERT_BACKEND=grouped_mm` |
 | Fast visual screening | `LINGBOT_MOE_EXPERT_BACKEND=sglang_triton_fp8` |
 | DiT memory sharding | add `--enable_fsdp_inference` |
+| VLM memory sharding | add `--enable_vlm_fsdp_inference` |
 
 For the GPU layout (CFG×CP / CP-only), see the "GPU Layout" section above.
 

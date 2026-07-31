@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import gc
+import inspect
 import json
 import logging
 import os
@@ -27,6 +28,13 @@ def _env_flag(name: str, default: bool = False) -> bool:
     if raw is None:
         return default
     return raw.lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int | None = None) -> int | None:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    return int(raw)
 
 
 def _configure_concise_import_logs() -> None:
@@ -69,6 +77,15 @@ except Exception as exc:  # pragma: no cover - deployment dependency guard
     _TRANSFORMERS_IMPORT_ERROR = exc
 else:
     _TRANSFORMERS_IMPORT_ERROR = None
+
+try:
+    _QWEN3VL_CLASS = (
+        getattr(_transformers, "Qwen3VLForConditionalGeneration")
+        if _transformers is not None
+        else None
+    )
+except Exception:  # pragma: no cover - deployment dependency guard
+    _QWEN3VL_CLASS = None
 
 try:
     import diffusers.utils.import_utils as _diffusers_import_utils
@@ -114,6 +131,7 @@ _install_sglang_import_shims()
 try:
     from lingbot_video.fsdp_inference import (
         apply_fsdp_inference,
+        apply_vlm_fsdp_inference,
         init_fsdp_inference_mesh,
     )
     from lingbot_video.model_paths import (
@@ -141,6 +159,7 @@ except Exception as exc:  # pragma: no cover - reported when generation is attem
     LingBotVideoPipeline = None
     LingBotVideoImageToVideoPipeline = None
     apply_fsdp_inference = None
+    apply_vlm_fsdp_inference = None
     init_fsdp_inference_mesh = None
     effective_refiner_model_dir = None
     model_component_dir = None
@@ -487,15 +506,99 @@ def _configure_pipeline_logs(pipe: Any) -> None:
         )
 
 
+def _validate_vae_tiling_kwargs(kwargs: dict[str, int]) -> None:
+    for name, value in kwargs.items():
+        if value <= 0:
+            raise ValueError(f"{name} must be positive, got {value}.")
+    height = kwargs.get("tile_sample_min_height")
+    stride_height = kwargs.get("tile_sample_stride_height")
+    if height is not None and stride_height is not None and stride_height > height:
+        raise ValueError(
+            "tile_sample_stride_height must be less than or equal to "
+            "tile_sample_min_height."
+        )
+    width = kwargs.get("tile_sample_min_width")
+    stride_width = kwargs.get("tile_sample_stride_width")
+    if width is not None and stride_width is not None and stride_width > width:
+        raise ValueError(
+            "tile_sample_stride_width must be less than or equal to "
+            "tile_sample_min_width."
+        )
+
+
+def _vae_tiling_kwargs_from_args(args: argparse.Namespace) -> dict[str, int]:
+    mapping = {
+        "tile_sample_min_height": getattr(args, "vae_tile_height", None),
+        "tile_sample_min_width": getattr(args, "vae_tile_width", None),
+        "tile_sample_stride_height": getattr(args, "vae_tile_stride_height", None),
+        "tile_sample_stride_width": getattr(args, "vae_tile_stride_width", None),
+    }
+    kwargs = {key: value for key, value in mapping.items() if value is not None}
+    _validate_vae_tiling_kwargs(kwargs)
+    return kwargs
+
+
+def _refiner_vae_tiling_kwargs_from_args(args: argparse.Namespace) -> dict[str, int]:
+    mapping = {
+        "tile_sample_min_height": args.refiner_vae_tile_height,
+        "tile_sample_min_width": args.refiner_vae_tile_width,
+        "tile_sample_stride_height": args.refiner_vae_tile_stride_height,
+        "tile_sample_stride_width": args.refiner_vae_tile_stride_width,
+    }
+    kwargs = {key: value for key, value in mapping.items() if value is not None}
+    _validate_vae_tiling_kwargs(kwargs)
+    return kwargs
+
+
+def _configure_vae_tiling(
+    pipe: Any,
+    enabled: bool,
+    label: str,
+    kwargs: dict[str, int],
+) -> None:
+    inner_pipe = _inner_diffusers_pipe(pipe)
+    vae = getattr(inner_pipe, "vae", None)
+    if not enabled:
+        disable_tiling = getattr(vae, "disable_tiling", None)
+        if callable(disable_tiling):
+            disable_tiling()
+        return
+    enable_tiling = getattr(vae, "enable_tiling", None)
+    if not callable(enable_tiling):
+        raise RuntimeError(
+            f"{label} VAE tiling was requested, but this pipeline VAE does not "
+            "provide enable_tiling()."
+        )
+    try:
+        signature = inspect.signature(enable_tiling)
+    except (TypeError, ValueError):
+        supports_kwargs = True
+        supported_names: set[str] = set()
+    else:
+        supports_kwargs = any(
+            parameter.kind == parameter.VAR_KEYWORD
+            for parameter in signature.parameters.values()
+        )
+        supported_names = set(signature.parameters)
+    if kwargs and not supports_kwargs:
+        unsupported = sorted(set(kwargs) - supported_names)
+        if unsupported:
+            raise RuntimeError(
+                f"{label} VAE tiling parameters are not supported by this VAE: "
+                f"{unsupported}."
+            )
+    enable_tiling(**kwargs)
+    config = kwargs if kwargs else "diffusers-default"
+    _log_progress(f"enabled {label} VAE tiling config={config}")
+
+
 @contextmanager
 def _patch_qwen3vl_from_pretrained():
-    try:
-        from transformers import Qwen3VLForConditionalGeneration
-    except Exception:
+    if _QWEN3VL_CLASS is None:
         yield
         return
 
-    original_from_pretrained = Qwen3VLForConditionalGeneration.from_pretrained
+    original_from_pretrained = _QWEN3VL_CLASS.from_pretrained
     attn_implementation = os.environ.get("LINGBOT_QWEN_ATTN_IMPLEMENTATION", "flash_attention_3")
 
     @classmethod
@@ -506,11 +609,11 @@ def _patch_qwen3vl_from_pretrained():
             kwargs["dtype"] = kwargs.pop("torch_dtype")
         return original_from_pretrained(pretrained_model_name_or_path, *args, **kwargs)
 
-    Qwen3VLForConditionalGeneration.from_pretrained = patched_from_pretrained
+    _QWEN3VL_CLASS.from_pretrained = patched_from_pretrained
     try:
         yield
     finally:
-        Qwen3VLForConditionalGeneration.from_pretrained = original_from_pretrained
+        _QWEN3VL_CLASS.from_pretrained = original_from_pretrained
 
 
 def _destroy_parallel_if_needed() -> None:
@@ -542,6 +645,18 @@ def _log_progress(message: str) -> None:
         print(message, flush=True)
 
 
+def _release_pipeline_for_memory(pipe: Any, label: str) -> None:
+    inner_pipe = _inner_diffusers_pipe(pipe)
+    for name in ("transformer", "text_encoder", "vae"):
+        if hasattr(inner_pipe, name):
+            setattr(inner_pipe, name, None)
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+    _log_progress(f"released {label} pipeline before refiner")
+
+
 def _apply_fsdp_inference_if_requested(
     pipe: Any,
     enabled: bool,
@@ -560,6 +675,29 @@ def _apply_fsdp_inference_if_requested(
     _log_progress("applying FSDP inference sharding")
     info = apply_fsdp_inference(transformer, mesh)
     _log_progress(f"applied FSDP inference sharding: {info}")
+    return info
+
+
+def _apply_vlm_fsdp_inference_if_requested(
+    pipe: Any,
+    enabled: bool,
+    mesh: DeviceMesh | None,
+) -> Any | None:
+    if not enabled:
+        return None
+    if apply_vlm_fsdp_inference is None:
+        raise RuntimeError("VLM FSDP inference helpers are not importable.") from (
+            _LINGBOT_PIPELINE_IMPORT_ERROR
+        )
+    inner_pipe = _inner_diffusers_pipe(pipe)
+    text_encoder = getattr(inner_pipe, "text_encoder", None)
+    if not isinstance(text_encoder, torch.nn.Module):
+        raise ValueError(
+            "VLM FSDP inference requires a pipeline with a torch.nn.Module text_encoder."
+        )
+    _log_progress("applying VLM FSDP inference sharding")
+    info = apply_vlm_fsdp_inference(text_encoder, mesh)
+    _log_progress(f"applied VLM FSDP inference sharding: {info}")
     return info
 
 
@@ -582,10 +720,10 @@ def _cache_prompt_conditions(
     else:
         negative_embeds, negative_mask = pipe.encode_prompt(negative_prompt, **encode_kwargs)
     return {
-        "prompt_embeds": prompt_embeds.detach().cpu(),
-        "prompt_mask": prompt_mask.detach().cpu(),
-        "negative_prompt_embeds": negative_embeds.detach().cpu(),
-        "negative_prompt_mask": negative_mask.detach().cpu(),
+        "prompt_embeds": prompt_embeds.detach(),
+        "prompt_mask": prompt_mask.detach(),
+        "negative_prompt_embeds": negative_embeds.detach(),
+        "negative_prompt_mask": negative_mask.detach(),
     }
 
 
@@ -621,7 +759,7 @@ def _cache_ti2v_prompt_conditions(
             null_cond_clone_zero=null_cond_clone_zero,
             images=[vlm_image],
         ),
-        pixel.detach().cpu(),
+        pixel.detach(),
     )
 
 
@@ -631,7 +769,10 @@ def _condition_call_kwargs(
 ) -> dict[str, torch.Tensor]:
     if not cache:
         return {}
-    return {key: value.to(device=device) for key, value in cache.items()}
+    return {
+        key: value if value.device == device else value.to(device=device)
+        for key, value in cache.items()
+    }
 
 
 def _pipeline_class_for_mode(mode: str) -> Any:
@@ -676,9 +817,44 @@ def _load_transformer_component(
     return transformer
 
 
-def _move_pipeline_aux_modules_to_device(pipe: Any, device: torch.device) -> Any:
+def _shared_auxiliary_components(
+    pipe: Any,
+    base_model_dir: Path,
+    refiner_model_dir: Path,
+    base_dtype_map: dict[str, torch.dtype],
+    refiner_dtype_map: dict[str, torch.dtype],
+) -> dict[str, Any]:
+    if base_model_dir.resolve() != refiner_model_dir.resolve():
+        return {}
+    if any(
+        base_dtype_map.get(name) != refiner_dtype_map.get(name)
+        for name in ("text_encoder", "vae")
+    ):
+        return {}
     inner_pipe = _inner_diffusers_pipe(pipe)
-    for name in ("text_encoder", "vae"):
+    components = {
+        name: getattr(inner_pipe, name, None)
+        for name in ("text_encoder", "vae", "processor")
+    }
+    if any(component is None for component in components.values()):
+        return {}
+    return components
+
+
+def _move_pipeline_modules_to_device(
+    pipe: Any,
+    device: torch.device,
+    deferred_components: frozenset[str],
+) -> Any:
+    supported_components = frozenset({"transformer", "text_encoder"})
+    unknown_components = deferred_components - supported_components
+    if unknown_components:
+        unknown = ", ".join(sorted(unknown_components))
+        raise ValueError(f"Unsupported deferred pipeline components: {unknown}.")
+    inner_pipe = _inner_diffusers_pipe(pipe)
+    for name in ("transformer", "text_encoder", "vae"):
+        if name in deferred_components:
+            continue
         module = getattr(inner_pipe, name, None)
         if isinstance(module, torch.nn.Module):
             _log_progress(f"moving {name} to {device}")
@@ -691,7 +867,8 @@ def _load_diffusers_pipe(
     dtype_map: dict[str, torch.dtype],
     mode: str,
     transformer_subfolder: str,
-    defer_transformer_to_device: bool = False,
+    deferred_components: frozenset[str] = frozenset(),
+    shared_components: dict[str, Any] | None = None,
 ) -> Any:
     pipeline_class = _pipeline_class_for_mode(mode)
     transformer = _load_transformer_component(model_dir, transformer_subfolder, dtype_map)
@@ -704,11 +881,12 @@ def _load_diffusers_pipe(
             transformer=transformer,
             trust_remote_code=True,
             torch_dtype=dtype_map,
+            **(shared_components or {}),
         )
     _log_progress(f"loaded pipeline mode={mode}")
     device = _default_device()
-    if defer_transformer_to_device:
-        return _move_pipeline_aux_modules_to_device(pipe, device)
+    if deferred_components:
+        return _move_pipeline_modules_to_device(pipe, device, deferred_components)
     _log_progress(f"moving pipeline to {device}")
     return pipe.to(device)
 
@@ -718,7 +896,8 @@ def _load_sglang_native_pipe(
     dtype_map: dict[str, torch.dtype],
     mode: str,
     transformer_subfolder: str,
-    defer_transformer_to_device: bool = False,
+    deferred_components: frozenset[str] = frozenset(),
+    shared_components: dict[str, Any] | None = None,
 ) -> Any:
     if LingBotVideoNativePipeline is None or register_lingbot_native_pipeline is None:
         raise RuntimeError(
@@ -732,7 +911,8 @@ def _load_sglang_native_pipe(
             dtype_map,
             mode=mode,
             transformer_subfolder=transformer_subfolder,
-            defer_transformer_to_device=defer_transformer_to_device,
+            deferred_components=deferred_components,
+            shared_components=shared_components,
         )
         return LingBotVideoNativePipeline.from_diffusers_pipe(
             diffusers_pipe,
@@ -746,31 +926,45 @@ def _load_pipe(
     args: argparse.Namespace,
     dtype_map: dict[str, torch.dtype],
     *,
-    defer_transformer_to_device: bool = False,
+    deferred_components: frozenset[str] = frozenset(),
+    shared_components: dict[str, Any] | None = None,
+    configure_vae_tiling: bool = True,
 ):
     model_dir = Path(args.model_dir).resolve()
     if args.engine == "diffusers":
-        return (
-            _load_diffusers_pipe(
-                model_dir,
-                dtype_map,
-                mode=args.mode,
-                transformer_subfolder=args.transformer_subfolder,
-                defer_transformer_to_device=defer_transformer_to_device,
-            ),
-            "diffusers-reference",
+        pipe = _load_diffusers_pipe(
+            model_dir,
+            dtype_map,
+            mode=args.mode,
+            transformer_subfolder=args.transformer_subfolder,
+            deferred_components=deferred_components,
+            shared_components=shared_components,
         )
+        if configure_vae_tiling:
+            _configure_vae_tiling(
+                pipe,
+                args.vae_tiling,
+                args.transformer_subfolder,
+                _vae_tiling_kwargs_from_args(args),
+            )
+        return pipe, "diffusers-reference"
     if args.engine == "sglang-native":
-        return (
-            _load_sglang_native_pipe(
-                model_dir,
-                dtype_map,
-                mode=args.mode,
-                transformer_subfolder=args.transformer_subfolder,
-                defer_transformer_to_device=defer_transformer_to_device,
-            ),
-            "sglang-native",
+        pipe = _load_sglang_native_pipe(
+            model_dir,
+            dtype_map,
+            mode=args.mode,
+            transformer_subfolder=args.transformer_subfolder,
+            deferred_components=deferred_components,
+            shared_components=shared_components,
         )
+        if configure_vae_tiling:
+            _configure_vae_tiling(
+                pipe,
+                args.vae_tiling,
+                args.transformer_subfolder,
+                _vae_tiling_kwargs_from_args(args),
+            )
+        return pipe, "sglang-native"
     raise ValueError(f"unsupported engine: {args.engine}")
 
 
@@ -807,7 +1001,8 @@ def _maybe_preload_refiner(
     device: torch.device,
     context_parallel_rank: int,
     context_parallel_mesh: DeviceMesh | None,
-    defer_transformer_to_device: bool,
+    deferred_components: frozenset[str],
+    base_pipe: Any,
 ) -> dict[str, Any]:
     requested = bool(args.run_refiner)
     available = (
@@ -826,6 +1021,7 @@ def _maybe_preload_refiner(
         "pipe": None,
         "engine_name": None,
         "component_dtypes": None,
+        "shared_auxiliary_components": (),
     }
     if not requested or not available:
         return state
@@ -834,16 +1030,35 @@ def _maybe_preload_refiner(
     refiner_args.model_dir = args.refiner_model_dir
     refiner_args.transformer_subfolder = args.refiner_transformer_subfolder
     refiner_args.vae_dtype = args.refiner_vae_dtype
+    refiner_args.vae_tiling = args.refiner_vae_tiling
+    refiner_args.vae_tile_height = args.refiner_vae_tile_height
+    refiner_args.vae_tile_width = args.refiner_vae_tile_width
+    refiner_args.vae_tile_stride_height = args.refiner_vae_tile_stride_height
+    refiner_args.vae_tile_stride_width = args.refiner_vae_tile_stride_width
     # The refiner always samples through the text-only t2v pipeline; ti2v
     # first-frame conditioning is injected as a clean frame-0 latent
     # (`cond_latent`), not through the image-to-video pipeline.
     refiner_args.mode = "t2v"
     refiner_dtype_map = dict(dtype_map)
     refiner_dtype_map["vae"] = _parse_dtype(args.refiner_vae_dtype)
+    shared_components = _shared_auxiliary_components(
+        base_pipe,
+        Path(args.model_dir),
+        Path(refiner_args.model_dir),
+        dtype_map,
+        refiner_dtype_map,
+    )
+    if shared_components:
+        _log_progress(
+            "reusing Base auxiliary components for Refiner: "
+            + ", ".join(shared_components)
+        )
     refiner_pipe, refiner_engine_name = _load_pipe(
         refiner_args,
         refiner_dtype_map,
-        defer_transformer_to_device=defer_transformer_to_device,
+        deferred_components=deferred_components,
+        shared_components=shared_components,
+        configure_vae_tiling=not bool(shared_components),
     )
     refiner_component_dtypes = _component_dtypes(refiner_pipe)
     expected_refiner_vae_dtype = _dtype_name(refiner_dtype_map["vae"])
@@ -867,6 +1082,7 @@ def _maybe_preload_refiner(
             "pipe": refiner_pipe,
             "engine_name": refiner_engine_name,
             "component_dtypes": refiner_component_dtypes,
+            "shared_auxiliary_components": tuple(shared_components),
         }
     )
     return state
@@ -1007,8 +1223,39 @@ def main() -> None:
     parser.add_argument("--transformer_subfolder", default="transformer")
     parser.add_argument("--text_encoder_dtype", default="bf16")
     parser.add_argument("--vae_dtype", default="fp32")
+    parser.add_argument(
+        "--vae_tiling",
+        action=argparse.BooleanOptionalAction,
+        default=_env_flag("LINGBOT_VAE_TILING"),
+        help="Enable diffusers VAE tiled decode/encode for the base pipeline.",
+    )
+    parser.add_argument(
+        "--vae_tile_height",
+        type=int,
+        default=_env_int("LINGBOT_VAE_TILE_HEIGHT"),
+    )
+    parser.add_argument(
+        "--vae_tile_width",
+        type=int,
+        default=_env_int("LINGBOT_VAE_TILE_WIDTH"),
+    )
+    parser.add_argument(
+        "--vae_tile_stride_height",
+        type=int,
+        default=_env_int("LINGBOT_VAE_TILE_STRIDE_HEIGHT"),
+    )
+    parser.add_argument(
+        "--vae_tile_stride_width",
+        type=int,
+        default=_env_int("LINGBOT_VAE_TILE_STRIDE_WIDTH"),
+    )
     parser.add_argument("--diffusers_attn_backend", default=os.environ.get("DIFFUSERS_ATTN_BACKEND", ""))
     parser.add_argument("--allow_tf32", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--deterministic_algorithms",
+        action=argparse.BooleanOptionalAction,
+        default=_env_flag("LINGBOT_DETERMINISTIC_ALGORITHMS"),
+    )
     parser.add_argument(
         "--quiet_progress",
         action="store_true",
@@ -1022,9 +1269,20 @@ def main() -> None:
         action="store_true",
         help="Shard the base/refiner DiT transformers with PyTorch composable FSDP2.",
     )
+    parser.add_argument(
+        "--enable_vlm_fsdp_inference",
+        action="store_true",
+        help="Shard the Qwen3-VL text and vision towers with PyTorch composable FSDP2.",
+    )
     parser.add_argument("--batch_cfg", action="store_true")
     parser.add_argument("--null_cond_clone_zero", action="store_true")
     parser.add_argument("--reuse_condition_features", action="store_true")
+    parser.add_argument(
+        "--release_base_before_refiner",
+        action=argparse.BooleanOptionalAction,
+        default=_env_flag("LINGBOT_RELEASE_BASE_BEFORE_REFINER"),
+        help="Free the base pipeline after saving the base output and before running the refiner.",
+    )
     parser.add_argument("--run_refiner", action="store_true")
     parser.add_argument("--refiner_model_dir", default=None)
     parser.add_argument("--refiner_transformer_subfolder", default="refiner")
@@ -1040,6 +1298,32 @@ def main() -> None:
     parser.add_argument("--refiner_sample_fps", type=int, default=24)
     parser.add_argument("--refiner_max_video_frames", type=int, default=None)
     parser.add_argument("--refiner_vae_dtype", default="fp32")
+    parser.add_argument(
+        "--refiner_vae_tiling",
+        action=argparse.BooleanOptionalAction,
+        default=_env_flag("LINGBOT_REFINER_VAE_TILING", True),
+        help="Enable diffusers VAE tiled decode/encode for the refiner pipeline.",
+    )
+    parser.add_argument(
+        "--refiner_vae_tile_height",
+        type=int,
+        default=_env_int("LINGBOT_REFINER_VAE_TILE_HEIGHT", 384),
+    )
+    parser.add_argument(
+        "--refiner_vae_tile_width",
+        type=int,
+        default=_env_int("LINGBOT_REFINER_VAE_TILE_WIDTH", 640),
+    )
+    parser.add_argument(
+        "--refiner_vae_tile_stride_height",
+        type=int,
+        default=_env_int("LINGBOT_REFINER_VAE_TILE_STRIDE_HEIGHT", 288),
+    )
+    parser.add_argument(
+        "--refiner_vae_tile_stride_width",
+        type=int,
+        default=_env_int("LINGBOT_REFINER_VAE_TILE_STRIDE_WIDTH", 480),
+    )
     parser.add_argument("--refiner_batch_cfg", action="store_true")
     parser.add_argument("--refiner_no_null_cond_clone_zero", action="store_true")
     parser.add_argument("--refiner_offload_vae_during_denoise", action="store_true")
@@ -1084,6 +1368,9 @@ def main() -> None:
             raise RuntimeError("model path helpers are not importable.") from _LINGBOT_PIPELINE_IMPORT_ERROR
         args.refiner_model_dir = str(effective_refiner_model_dir(args))
 
+    if args.enable_vlm_fsdp_inference and int(os.environ.get("WORLD_SIZE", "1")) <= 1:
+        raise ValueError("VLM FSDP inference requires a distributed world size greater than 1.")
+
     (
         rank,
         local_rank,
@@ -1095,7 +1382,7 @@ def main() -> None:
     ) = _init_parallel(
         args.cfg_parallel_degree,
         args.context_parallel_degree,
-        args.enable_fsdp_inference,
+        args.enable_fsdp_inference or args.enable_vlm_fsdp_inference,
     )
     if args.cfg_parallel_degree > 1 and args.batch_cfg:
         raise ValueError("`--cfg_parallel_degree > 1` and `--batch_cfg` are mutually exclusive.")
@@ -1114,21 +1401,31 @@ def main() -> None:
     if args.allow_tf32:
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.set_float32_matmul_precision("high")
+    if args.deterministic_algorithms:
+        torch.use_deterministic_algorithms(True)
+        torch.backends.cudnn.benchmark = False
     if args.mode == "t2i":
         args.num_frames = 1
 
     fsdp_mesh = None
-    if args.enable_fsdp_inference:
+    if args.enable_fsdp_inference or args.enable_vlm_fsdp_inference:
         if init_fsdp_inference_mesh is None:
             raise RuntimeError("FSDP inference helpers are not importable.") from _LINGBOT_PIPELINE_IMPORT_ERROR
         fsdp_mesh = init_fsdp_inference_mesh()
 
     dtype_map = _make_dtype_map(args)
-    defer_transformer_to_device = fsdp_mesh is not None
+    deferred_components = frozenset(
+        name
+        for name, enabled in (
+            ("transformer", args.enable_fsdp_inference),
+            ("text_encoder", args.enable_vlm_fsdp_inference),
+        )
+        if enabled
+    )
     pipe, engine_name = _load_pipe(
         args,
         dtype_map,
-        defer_transformer_to_device=defer_transformer_to_device,
+        deferred_components=deferred_components,
     )
     _configure_pipeline_logs(pipe)
     component_dtypes = _component_dtypes(pipe)
@@ -1149,6 +1446,11 @@ def main() -> None:
             args.cfg_parallel_degree == 1,
         )
     base_fsdp_info = _apply_fsdp_inference_if_requested(pipe, args.enable_fsdp_inference, fsdp_mesh)
+    base_vlm_fsdp_info = _apply_vlm_fsdp_inference_if_requested(
+        pipe,
+        args.enable_vlm_fsdp_inference,
+        fsdp_mesh,
+    )
 
     refiner_state = _maybe_preload_refiner(
         args,
@@ -1156,15 +1458,28 @@ def main() -> None:
         device,
         context_parallel_rank,
         context_parallel_mesh,
-        defer_transformer_to_device,
+        deferred_components,
+        pipe,
+    )
+    _configure_vae_tiling(
+        pipe,
+        args.vae_tiling,
+        args.transformer_subfolder,
+        _vae_tiling_kwargs_from_args(args),
     )
     if refiner_state["pipe"] is not None:
         _configure_pipeline_logs(refiner_state["pipe"])
     refiner_fsdp_info = None
+    refiner_vlm_fsdp_info = None
     if refiner_state["pipe"] is not None:
         refiner_fsdp_info = _apply_fsdp_inference_if_requested(
             refiner_state["pipe"],
             args.enable_fsdp_inference,
+            fsdp_mesh,
+        )
+        refiner_vlm_fsdp_info = _apply_vlm_fsdp_inference_if_requested(
+            refiner_state["pipe"],
+            args.enable_vlm_fsdp_inference,
             fsdp_mesh,
         )
     if rank == 0 and refiner_state["refiner_requested"] and not refiner_state["refiner_available"]:
@@ -1178,7 +1493,7 @@ def main() -> None:
     generator = torch.Generator(device=device).manual_seed(args.seed)
     condition_cache = None
     input_image = None
-    ti2v_image_tensor_cpu = None
+    ti2v_image_tensor = None
     should_cache_conditions = (
         args.reuse_condition_features
         or bool(refiner_state["refiner_available"])
@@ -1192,7 +1507,7 @@ def main() -> None:
             else _make_default_image(args.height, args.width)
         )
         if should_cache_conditions:
-            condition_cache, ti2v_image_tensor_cpu = _cache_ti2v_prompt_conditions(
+            condition_cache, ti2v_image_tensor = _cache_ti2v_prompt_conditions(
                 pipe,
                 args.prompt,
                 args.negative_prompt,
@@ -1228,8 +1543,12 @@ def main() -> None:
         call_kwargs["null_cond_clone_zero"] = args.null_cond_clone_zero
     if args.mode == "ti2v":
         call_kwargs["image"] = input_image
-        if ti2v_image_tensor_cpu is not None:
-            call_kwargs["image_tensor"] = ti2v_image_tensor_cpu.to(device=device)
+        if ti2v_image_tensor is not None:
+            call_kwargs["image_tensor"] = (
+                ti2v_image_tensor
+                if ti2v_image_tensor.device == device
+                else ti2v_image_tensor.to(device=device)
+            )
     if args.cfg_parallel_degree > 1:
         call_kwargs["cfg_parallel_group"] = cfg_parallel_group
 
@@ -1245,7 +1564,11 @@ def main() -> None:
             f"guidance={args.guidance_scale} shift={args.shift} seed={args.seed} "
             f"attn_backend={os.environ.get('DIFFUSERS_ATTN_BACKEND')} "
             f"allow_tf32={torch.backends.cuda.matmul.allow_tf32} "
-            f"fsdp_inference={base_fsdp_info} "
+            f"deterministic_algorithms={torch.are_deterministic_algorithms_enabled()} "
+            f"vae_tiling={args.vae_tiling} "
+            f"release_base_before_refiner={args.release_base_before_refiner} "
+            f"dit_fsdp_inference={base_fsdp_info} "
+            f"vlm_fsdp_inference={base_vlm_fsdp_info} "
             f"component_dtypes={component_dtypes}",
             flush=True,
         )
@@ -1268,6 +1591,9 @@ def main() -> None:
 
     _sync_parallel_if_needed()
     del result, frames, call_kwargs
+    if args.release_base_before_refiner:
+        _release_pipeline_for_memory(pipe, "base")
+        pipe = None
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -1279,6 +1605,12 @@ def main() -> None:
         raise RuntimeError("Refiner was marked available but was not preloaded.")
     refiner_engine_name = str(refiner_state["engine_name"])
     refiner_component_dtypes = refiner_state["component_dtypes"]
+    _configure_vae_tiling(
+        refiner_pipe,
+        args.refiner_vae_tiling,
+        args.refiner_transformer_subfolder,
+        _refiner_vae_tiling_kwargs_from_args(args),
+    )
 
     refiner_generator = torch.Generator(device=device).manual_seed(args.seed)
     lowres_video, lowres_meta = load_refiner_video_tensor(
@@ -1353,7 +1685,9 @@ def main() -> None:
             f"seed={args.seed} "
             f"batch_cfg={args.refiner_batch_cfg} "
             f"first_frame_condition={first_frame_condition_enabled} "
-            f"fsdp_inference={refiner_fsdp_info} "
+            f"vae_tiling={args.refiner_vae_tiling} "
+            f"dit_fsdp_inference={refiner_fsdp_info} "
+            f"vlm_fsdp_inference={refiner_vlm_fsdp_info} "
             f"component_dtypes={refiner_component_dtypes}",
             flush=True,
         )

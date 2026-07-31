@@ -25,6 +25,15 @@ class FSDPInferenceInfo:
     ignored_params: int
 
 
+@dataclass(frozen=True)
+class VLMFSDPInferenceInfo:
+    enabled: bool
+    world_size: int
+    text_layers: int
+    vision_blocks: int
+    local_parameter_bytes: int
+
+
 def init_fsdp_inference_mesh() -> DeviceMesh | None:
     if not dist.is_available() or not dist.is_initialized():
         return None
@@ -56,6 +65,74 @@ def _current_cuda_device() -> torch.device | None:
     if not torch.cuda.is_available():
         return None
     return torch.device("cuda", torch.cuda.current_device())
+
+
+def _local_parameter_bytes(module: torch.nn.Module) -> int:
+    total = 0
+    for parameter in module.parameters():
+        local_parameter = parameter.to_local() if hasattr(parameter, "to_local") else parameter
+        total += local_parameter.numel() * local_parameter.element_size()
+    return total
+
+
+def _resolve_vlm_fsdp_units(
+    text_encoder: torch.nn.Module,
+) -> tuple[tuple[torch.nn.Module, ...], tuple[torch.nn.Module, ...]]:
+    model = getattr(text_encoder, "model", None)
+    language_model = getattr(model, "language_model", None)
+    text_layers = getattr(language_model, "layers", None)
+    visual = getattr(model, "visual", None)
+    vision_blocks = getattr(visual, "blocks", None)
+    if text_layers is None or vision_blocks is None:
+        module_type = type(text_encoder).__name__
+        raise ValueError(
+            f"Unsupported VLM structure for {module_type}: expected "
+            "model.language_model.layers and model.visual.blocks."
+        )
+    return tuple(text_layers), tuple(vision_blocks)
+
+
+def apply_vlm_fsdp_inference(
+    text_encoder: torch.nn.Module,
+    mesh: DeviceMesh | None,
+) -> VLMFSDPInferenceInfo:
+    if mesh is None:
+        return VLMFSDPInferenceInfo(
+            enabled=False,
+            world_size=1,
+            text_layers=0,
+            vision_blocks=0,
+            local_parameter_bytes=_local_parameter_bytes(text_encoder),
+        )
+    cached_info = getattr(text_encoder, "_lingbot_vlm_fsdp_inference_info", None)
+    if cached_info is not None:
+        return cached_info
+    if fully_shard is None:
+        raise RuntimeError("PyTorch composable FSDP is not importable.") from FSDP_IMPORT_ERROR
+
+    text_layers, vision_blocks = _resolve_vlm_fsdp_units(text_encoder)
+    cuda_device = _current_cuda_device()
+    if cuda_device is not None:
+        _move_buffers_to_device(text_encoder, cuda_device)
+
+    for layer in text_layers:
+        fully_shard(layer, mesh=mesh)
+    for block in vision_blocks:
+        fully_shard(block, mesh=mesh)
+    fully_shard(text_encoder.model, mesh=mesh)
+
+    gc.collect()
+    if cuda_device is not None:
+        torch.cuda.empty_cache()
+    info = VLMFSDPInferenceInfo(
+        enabled=True,
+        world_size=int(mesh.size()),
+        text_layers=len(text_layers),
+        vision_blocks=len(vision_blocks),
+        local_parameter_bytes=_local_parameter_bytes(text_encoder),
+    )
+    text_encoder._lingbot_vlm_fsdp_inference_info = info
+    return info
 
 
 def apply_fsdp_inference(

@@ -10,6 +10,7 @@
 | [Prompt 准备](prompt_preparation.md) | 把普通 prompt 改写成结构化 JSON caption，并按需生成样本级 negative prompt。 |
 | [Diffusers 推理](dit_inference.md) | 使用 diffusers 路径运行 T2I、T2V、TI2V、Refinement。 |
 | [SGLang Diffusion 推理](sglang_diffusion.md) | 使用 SGLang Diffusion 并行加速推理。 |
+| [推理性能与显存报告](performance_benchmark.md) | 对比 Dense/MoE 的 Single GPU、CP8、DiT FSDP、VLM FSDP 和 FP8 速度显存取舍。 |
 
 ## 推荐流程
 

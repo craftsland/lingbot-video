@@ -94,11 +94,28 @@ python scripts/inference.py \
   --text_encoder_dtype bf16 \
   --vae_dtype fp32 \
   --refiner_vae_dtype fp32 \
+  --refiner_vae_tiling \
+  --refiner_vae_tile_height 384 \
+  --refiner_vae_tile_width 640 \
+  --refiner_vae_tile_stride_height 288 \
+  --refiner_vae_tile_stride_width 480 \
+  --release_base_before_refiner \
   --reuse_condition_features
 ```
 
 The refiner is only supported for video modes. It reuses base condition
 features when `--reuse_condition_features` is enabled.
+`--release_base_before_refiner` frees the base pipeline after the base output
+is saved; use `--no-release_base_before_refiner` only in a long-running service
+that intentionally keeps the base pipeline resident for later requests.
+
+### Video VAE Decode Tiling
+
+VAE tiling lowers peak memory during video decode. Use `--vae_tiling` for the
+base VAE and `--refiner_vae_tiling` for the refiner VAE. The 1080p refiner
+defaults to `384x640` tiles with `288x480` strides. Tiling adds some decode
+overhead; when memory is sufficient, disable it with `--no-vae_tiling` or
+`--no-refiner_vae_tiling`, respectively.
 
 ## Multi-GPU FSDP Inference
 
@@ -110,12 +127,19 @@ GPU. The flag shards every loaded DiT transformer with PyTorch composable FSDP:
 - base plus refiner inference shards both the base `transformer/` DiT and the
   `refiner/` DiT before base generation starts.
 - VLM/text encoder, VAE, scheduler, and prompt features are not sharded by this
-  flag.
+  flag. Add `--enable_vlm_fsdp_inference` independently to shard Qwen3-VL.
 
-FSDP inference can be combined with context parallel and CFG parallel. For
+The DiT and VLM flags can be enabled separately or together. VLM FSDP shards
+the 36 language layers, 24 vision blocks, and encoder root. It requires a
+distributed launch with more than one process. It reduces GPU peak memory but
+does not improve stable single-request latency; see the measured
+[inference performance benchmark](performance_benchmark.md).
+
+FSDP inference can be combined with context parallel and CFG parallel. The
+provided scripts and examples use sequential CFG to reduce peak memory. For
 context parallel on all GPUs, use `--context_parallel_degree` equal to the GPU
-count; add `--batch_cfg` when you want batched CFG. For FSDP-only memory
-sharding, launch with `torchrun` and keep
+count; add `--batch_cfg` only when you explicitly prefer batched CFG. For
+FSDP-only memory sharding, launch with `torchrun` and keep
 `--cfg_parallel_degree 1 --context_parallel_degree 1`.
 
 FSDP inference reduces GPU memory after the DiT is wrapped. During
@@ -147,19 +171,25 @@ torchrun --standalone --nproc_per_node 8 scripts/inference.py \
   --refiner_shift 3 \
   --cfg_parallel_degree 1 \
   --context_parallel_degree 8 \
-  --batch_cfg \
-  --refiner_batch_cfg \
   --enable_fsdp_inference \
+  --enable_vlm_fsdp_inference \
   --transformer_dtype bf16 \
   --text_encoder_dtype bf16 \
   --vae_dtype fp32 \
   --refiner_vae_dtype fp32 \
+  --refiner_vae_tiling \
+  --refiner_vae_tile_height 384 \
+  --refiner_vae_tile_width 640 \
+  --refiner_vae_tile_stride_height 288 \
+  --refiner_vae_tile_stride_width 480 \
+  --release_base_before_refiner \
   --reuse_condition_features
 ```
 
-The runtime log prints one `fsdp_inference=...` field for the base stage and
-one for the refiner stage. When both are enabled successfully, both fields show
-`FSDPInferenceInfo(enabled=True, ...)`.
+The runtime log reports `dit_fsdp_inference=...` and
+`vlm_fsdp_inference=...` separately. When enabled successfully, they show
+`FSDPInferenceInfo(enabled=True, ...)` and
+`VLMFSDPInferenceInfo(enabled=True, ...)`, respectively.
 
 ## TI2V
 

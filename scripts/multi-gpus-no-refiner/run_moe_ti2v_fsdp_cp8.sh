@@ -69,7 +69,6 @@ fi
   --transformer_dtype bf16 \
   --text_encoder_dtype bf16 \
   --vae_dtype fp32 \
-  --batch_cfg \
   "${PARALLEL_ARGS[@]}"
 
 echo "Saved: $OUT_DIR/ti2v.mp4"

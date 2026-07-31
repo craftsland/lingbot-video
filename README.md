@@ -1,6 +1,6 @@
 # LingBot-Video
 
-**🌐 [Project Page](https://technology.robbyant.com/lingbot-video)** | **🤗 [Hugging Face](https://huggingface.co/collections/robbyant/lingbot-video)** | **🤖 [ModelScope](https://www.modelscope.cn/collections/Robbyant/LingBot-Video)** | **📄 [Paper](https://arxiv.org/abs/2607.07675)** | **⚖️ [License](LICENSE)**| **💬 [WeChat 微信 Group](assets/WeChatGroup.JPG)** 
+**🌐 [Project Page](https://technology.robbyant.com/lingbot-video)** | **🤗 [Hugging Face](https://huggingface.co/collections/robbyant/lingbot-video)** | **🤖 [ModelScope](https://www.modelscope.cn/collections/Robbyant/LingBot-Video)** | **📄 [Paper](https://arxiv.org/abs/2607.07675)** | **⚖️ [License](LICENSE)** | **💬 [WeChat 微信 Group](https://github.com/Robbyant/lingbot-video/blob/master/assets/WeChatGroup.JPG)**
 
 **📘 English Usage**: [English Documentation](docs/en/index.md) \
 **📕 中文使用文档**: [中文文档](docs/zh/index.md)
@@ -106,7 +106,10 @@ Backend choices:
 For multi-GPU inference, add `--enable_fsdp_inference` to shard the base DiT and
 refiner DiT on GPU. This reduces GPU memory pressure after loading, but each
 rank still constructs the transformer on host memory before FSDP sharding; make
-sure the machine has enough system RAM for large MoE checkpoints.
+sure the machine has enough system RAM for large MoE checkpoints. Add
+`--enable_vlm_fsdp_inference` independently when Qwen3-VL also needs GPU-memory
+sharding; see the [inference performance benchmark](docs/en/performance_benchmark.md)
+for the complete Dense/MoE speed, memory, and exactness matrix.
 
 ```bash
 # Model root (released Dense or MoE package) and rewriter weights.
@@ -146,8 +149,19 @@ python scripts/inference.py \
   --text_encoder_dtype bf16 \
   --vae_dtype fp32 \
   --refiner_vae_dtype fp32 \
+  --refiner_vae_tiling \
+  --refiner_vae_tile_height 384 \
+  --refiner_vae_tile_width 640 \
+  --refiner_vae_tile_stride_height 288 \
+  --refiner_vae_tile_stride_width 480 \
+  --release_base_before_refiner \
   --reuse_condition_features
 ```
+
+For 1080p refiner output, refiner VAE tiling is enabled by default with
+`384x640` tiles and `288x480` strides. This is a memory-saving 25% overlap
+setting. Use `--no-refiner_vae_tiling` only when decode memory is already
+comfortable and you prefer faster VAE decode.
 
 Ready-to-run scripts are provided for single-GPU and multi-GPU inference. Set
 your environment and model path first:
@@ -159,8 +173,8 @@ export DENSE_MODEL_DIR="<path_to_lingbot-video-dense>"
 export MOE_MODEL_DIR="<path_to_lingbot-video-moe>"
 ```
 
-Single-GPU scripts use direct diffusers and batched CFG by default. They run
-base generation only.
+Single-GPU scripts use direct diffusers and sequential CFG by default to reduce
+peak memory. They run base generation only.
 
 ```bash
 MODEL_DIR="$DENSE_MODEL_DIR" ./scripts/single-gpu/run_dense_t2i.sh
@@ -185,10 +199,11 @@ MODEL_DIR="$MOE_MODEL_DIR" ./scripts/multi-gpus-no-refiner/run_moe_t2v_fsdp_cp8.
 MODEL_DIR="$MOE_MODEL_DIR" ./scripts/multi-gpus-no-refiner/run_moe_ti2v_fsdp_cp8.sh
 ```
 
-Multi-GPU refiner scripts use CP8 + FSDP + batched CFG by default. They also
-default to direct diffusers; set `BACKEND=sglang` externally when you want to
-exercise SGLang Diffusion. MoE multi-GPU T2V/TI2V scripts additionally run the
-refiner.
+Multi-GPU refiner scripts use CP8 + FSDP + sequential CFG by default. They
+release the base pipeline before refiner execution and enable refiner VAE
+tiling for 1080p decode. The scripts default to direct diffusers; set
+`BACKEND=sglang` externally when you want to exercise SGLang Diffusion. MoE
+multi-GPU T2V/TI2V scripts additionally run the refiner.
 
 ```bash
 MODEL_DIR="$DENSE_MODEL_DIR" ./scripts/multi-gpus/run_dense_t2i_fsdp_cp8.sh
@@ -214,6 +229,11 @@ SGLang, and speed-first FP8 workflows.
 
 ## 📊 Benchmarks
 
+The complete Dense/MoE inference matrix covers Single GPU, CP8, DiT FSDP,
+VLM FSDP, Direct Diffusers, SGLang Adapter Exact, and MoE FP8 expert:
+[Performance Benchmark](docs/en/performance_benchmark.md) /
+[推理性能与显存报告](docs/zh/performance_benchmark.md).
+
 ### 🏛️ Public Benchmark
 
 As of July 9th, 2026, LingBot-Video ranks top in [RBench Leaderboard](https://huggingface.co/spaces/DAGroup-PKU/RBench-Leaderboard).
@@ -228,7 +248,6 @@ As of July 9th, 2026, LingBot-Video ranks top in [RBench Leaderboard](https://hu
 | Wan 2.6 | ❌ | <u>0.607</u> | 0.546 | **0.656** | <u>0.479</u> | 0.514 | **0.531** | **0.666** | **0.681** | 0.723 | 0.667 |
 | Seedance 1.5 pro | ❌ | 0.584 | <u>0.577</u> | 0.495 | **0.484** | 0.570 | 0.470 | <u>0.648</u> | <u>0.641</u> | 0.680 | **0.692** |
 | Veo 3 | ❌ | 0.563 | 0.521 | 0.508 | 0.430 | 0.530 | 0.504 | 0.634 | 0.610 | 0.689 | 0.637 |
-
 
 *Note: **Bold** indicates the best performance, and <u>underline</u> indicates the second best.*
 

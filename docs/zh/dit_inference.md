@@ -89,11 +89,27 @@ python scripts/inference.py \
   --text_encoder_dtype bf16 \
   --vae_dtype fp32 \
   --refiner_vae_dtype fp32 \
+  --refiner_vae_tiling \
+  --refiner_vae_tile_height 384 \
+  --refiner_vae_tile_width 640 \
+  --refiner_vae_tile_stride_height 288 \
+  --refiner_vae_tile_stride_width 480 \
+  --release_base_before_refiner \
   --reuse_condition_features
 ```
 
 refiner 只支持视频模式。开启 `--reuse_condition_features` 时，refiner 会复用
 base 的 condition feature。
+`--release_base_before_refiner` 会在 base 输出保存后释放 base pipeline；只有
+长期服务需要保留 base pipeline 供后续请求复用时，才使用
+`--no-release_base_before_refiner`。
+
+### 视频 VAE Decode Tiling
+
+视频 VAE decode 可以通过 tiling 降低峰值显存：Base VAE 使用 `--vae_tiling`，
+Refiner VAE 使用 `--refiner_vae_tiling`。1080p Refiner 默认使用 `384x640` tile
+和 `288x480` stride。Tiling 会增加少量 decode 时间；显存充足时可以分别使用
+`--no-vae_tiling` 或 `--no-refiner_vae_tiling` 关闭。
 
 ## 多卡 FSDP 推理
 
@@ -104,12 +120,41 @@ composable FSDP 切分所有已加载的 DiT transformer：
 - 只跑 base 时，切分 base `transformer/` DiT。
 - 跑 base + refiner 时，在 base 生成开始前同时切分 base `transformer/` DiT 和
   `refiner/` DiT。
-- VLM/text encoder、VAE、scheduler 和 prompt feature 不会被这个开关切分。
+- VLM/text encoder、VAE、scheduler 和 prompt feature 不会被这个开关切分；
+  如需切分 Qwen3-VL，需要独立添加 `--enable_vlm_fsdp_inference`。
 
-FSDP 推理可以和 context parallel、CFG parallel 一起使用。使用所有 GPU 做
-context parallel 时，令 `--context_parallel_degree` 等于 GPU 数；如果希望使用
-batched CFG，再添加 `--batch_cfg`。如果只想做 FSDP 显存切分、不做 CP/CFG 并行，
-则用 `torchrun` 启动多进程，同时保持 `--cfg_parallel_degree 1 --context_parallel_degree 1`。
+DiT 和 VLM 两个开关可以分别启用，也可以组合使用。VLM FSDP 会切分 36 个语言层、
+24 个视觉 block 和 encoder root，并且要求使用多于一个进程的 distributed 启动。
+它可以降低 GPU 峰值显存，但不会提升稳定单请求速度；实测数据见
+[推理性能与显存报告](performance_benchmark.md)。
+
+### VLM FSDP 快速用法
+
+VLM FSDP 必须通过 `torchrun` 使用多进程启动。在原有推理命令中添加对应开关：
+
+| 需要切分的组件 | 参数 |
+| --- | --- |
+| 只切分 Qwen3-VL | `--enable_vlm_fsdp_inference` |
+| 只切分 DiT | `--enable_fsdp_inference` |
+| 同时切分 DiT 和 Qwen3-VL | 同时添加两个参数 |
+
+8 GPU、CP8、同时切分 DiT 和 Qwen3-VL 时，在下方完整推理示例中保留这四个参数：
+
+```text
+--context_parallel_degree 8
+--context_parallel_ulysses_anything
+--enable_fsdp_inference
+--enable_vlm_fsdp_inference
+```
+
+启动后检查日志中的 `vlm_fsdp_inference=VLMFSDPInferenceInfo(enabled=True, ...)`；
+出现该字段表示 VLM FSDP 已生效。
+
+FSDP 推理可以和 context parallel、CFG parallel 一起使用。预置脚本和示例默认
+使用 sequential CFG 降低峰值显存。使用所有 GPU 做 context parallel 时，令
+`--context_parallel_degree` 等于 GPU 数；只有明确希望使用 batched CFG 时才添加
+`--batch_cfg`。如果只想做 FSDP 显存切分、不做 CP/CFG 并行，则用 `torchrun`
+启动多进程，同时保持 `--cfg_parallel_degree 1 --context_parallel_degree 1`。
 
 FSDP 推理降低的是 DiT wrap 之后的 GPU 显存占用。初始化阶段每个 rank 仍会先在
 host memory 上构建一份 transformer，然后再做 FSDP 切分；大 MoE checkpoint 需要
@@ -139,18 +184,24 @@ torchrun --standalone --nproc_per_node 8 scripts/inference.py \
   --refiner_shift 3 \
   --cfg_parallel_degree 1 \
   --context_parallel_degree 8 \
-  --batch_cfg \
-  --refiner_batch_cfg \
   --enable_fsdp_inference \
+  --enable_vlm_fsdp_inference \
   --transformer_dtype bf16 \
   --text_encoder_dtype bf16 \
   --vae_dtype fp32 \
   --refiner_vae_dtype fp32 \
+  --refiner_vae_tiling \
+  --refiner_vae_tile_height 384 \
+  --refiner_vae_tile_width 640 \
+  --refiner_vae_tile_stride_height 288 \
+  --refiner_vae_tile_stride_width 480 \
+  --release_base_before_refiner \
   --reuse_condition_features
 ```
 
-运行日志会分别为 base 阶段和 refiner 阶段打印一个 `fsdp_inference=...` 字段。
-两个阶段都成功开启时，都会显示 `FSDPInferenceInfo(enabled=True, ...)`。
+运行日志会分别打印 `dit_fsdp_inference=...` 和 `vlm_fsdp_inference=...`。
+成功开启后，对应显示 `FSDPInferenceInfo(enabled=True, ...)` 和
+`VLMFSDPInferenceInfo(enabled=True, ...)`。
 
 ## TI2V
 

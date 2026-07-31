@@ -59,7 +59,6 @@ mkdir -p "$OUT_DIR"
   --vae_dtype fp32 \
   --context_parallel_degree "$CP" \
   --context_parallel_ulysses_anything \
-  --enable_fsdp_inference \
-  --batch_cfg
+  --enable_fsdp_inference
 
 echo "Saved: $OUT_DIR/t2i.png"

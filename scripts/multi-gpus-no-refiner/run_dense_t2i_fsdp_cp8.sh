@@ -55,7 +55,6 @@ mkdir -p "$OUT_DIR"
   --transformer_dtype bf16 \
   --text_encoder_dtype bf16 \
   --vae_dtype fp32 \
-  --batch_cfg \
   --context_parallel_degree "$CP" \
   --context_parallel_ulysses_anything \
   --enable_fsdp_inference
