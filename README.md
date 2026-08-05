@@ -21,6 +21,7 @@ We are excited to introduce **LingBot-Video**, the first open-source large-scale
 
 ## 🔥 Latest News
 
+- Aug 5, 2026: 🎉 We release the RBench evalution for LingBot-Video.
 - July 9, 2026: 🎉 We release the technical report, code, models, rewriters for LingBot-Video.
 
 ## 📦 Model Download
@@ -31,6 +32,12 @@ We are excited to introduce **LingBot-Video**, the first open-source large-scale
 | 💪 LingBot-Video-MoE | MoE (30B-A3B) + Refiner | T2I, T2V, TI2V, Refinement | 🤗 [Huggingface](https://huggingface.co/robbyant/lingbot-video-moe-30b-a3b) &nbsp; 🤖 [ModelScope](https://www.modelscope.cn/models/Robbyant/lingbot-video-moe-30b-a3b) |
 | 📝 LingBot-Video-Rewriter-Base | Qwen3.6-27B official | Prompt rewriter (Expand) | 🤗 [Huggingface](https://huggingface.co/Qwen/Qwen3.6-27B) &nbsp; 🤖 [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3.6-27B) |
 | 📝 LingBot-Video-Rewriter-Adapter | Qwen3.6-27B LoRA | Prompt rewriter (Json) | 🤗 [Huggingface](https://huggingface.co/robbyant/lingbot-video-rewriter-lora) &nbsp; 🤖 [ModelScope](https://www.modelscope.cn/models/Robbyant/lingbot-video-rewriter-lora) |
+
+## 📦 Evaluation Download
+
+| Dataset Name | Benchmark | Download |
+| --- | --- | --- |
+| 📊 LingBot-Video-RBench | RBench 🌐 [webpage](https://dagroup-pku.github.io/ReVidgen.github.io/) 🏆 [leaderboard](https://huggingface.co/spaces/DAGroup-PKU/RBench-Leaderboard) | 🤗 [Huggingface](https://huggingface.co/datasets/robbyant/lingbot-video-rbench) |
 
 ## 🚀 Quick Start
 
