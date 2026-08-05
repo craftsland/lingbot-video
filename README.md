@@ -21,7 +21,7 @@ We are excited to introduce **LingBot-Video**, the first open-source large-scale
 
 ## 🔥 Latest News
 
-- Aug 5, 2026: 🎉 We release the RBench evalution for LingBot-Video.
+- Aug 5, 2026: 🎉 We release the RBench evaluation for LingBot-Video.
 - July 9, 2026: 🎉 We release the technical report, code, models, rewriters for LingBot-Video.
 
 ## 📦 Model Download
