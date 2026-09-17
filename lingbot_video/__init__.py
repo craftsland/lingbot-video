@@ -5,6 +5,10 @@ from typing import Any
 
 
 _EXPORTS = {
+    "DMDStudentScheduler": (
+        "lingbot_video.scheduling_dmd_student",
+        "DMDStudentScheduler",
+    ),
     "FlowUniPCMultistepScheduler": (
         "lingbot_video.scheduling_flow_unipc",
         "FlowUniPCMultistepScheduler",

@@ -132,13 +132,13 @@ class LingBotVideoPipeline(DiffusionPipeline):
 
     def __init__(self, transformer, vae, text_encoder, processor, scheduler):
         super().__init__()
-        if (
-            scheduler is not None
-            and scheduler.__class__.__name__ != FlowUniPCMultistepScheduler.__name__
+        if scheduler is not None and scheduler.__class__.__name__ not in (
+            FlowUniPCMultistepScheduler.__name__,
+            "DMDStudentScheduler",
         ):
             raise TypeError(
-                "LingBotVideoPipeline requires vendored FlowUniPCMultistepScheduler; "
-                f"got {scheduler.__class__.__name__}."
+                "LingBotVideoPipeline requires the vendored FlowUniPCMultistepScheduler "
+                f"or DMDStudentScheduler; got {scheduler.__class__.__name__}."
             )
         self.register_modules(
             transformer=transformer,

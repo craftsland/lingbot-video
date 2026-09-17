@@ -10,6 +10,7 @@ This documentation is organized around the public inference workflow. Start with
 | [Prompt Preparation](prompt_preparation.md) | Rewrite plain prompts into structured JSON captions and optionally create per-sample negative prompts. |
 | [Diffusers Inference](dit_inference.md) | Run diffusers inference for T2I, T2V, TI2V, and Refinement. |
 | [SGLang Diffusion Inference](sglang_diffusion.md) | Run SGLang Diffusion for parallel accelerated inference. |
+| [Few-Step (DMD Student) Sampling](dmd_student_sampling.md) | Sample DMD-distilled student checkpoints in 8 steps with the trained DDIM→Euler geometry (t2v and ti2v). |
 | [Inference Performance Benchmark](performance_benchmark.md) | Compare Dense/MoE Single GPU, CP8, DiT FSDP, VLM FSDP, and FP8 speed-memory trade-offs. |
 
 ## Recommended Workflow

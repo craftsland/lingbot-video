@@ -12,6 +12,7 @@ We are excited to introduce **LingBot-Video**, the first open-source large-scale
 * **🚀 Efficient MoE Architecture**: Scaled from scratch; balanced between capacity and cost with **~3x** faster inference.
 * **📦 Data Engine**: Trained on massive web videos integrated with **70,000+ hours** of embodied data.
 * **⚖️ Multi Reward System**: Rewarded for **high aesthetics**, **physical rationality**, and **task completion**.
+* **⚡ Few-Step Student Sampling**: DMD-distilled checkpoints (t2v and ti2v) for 8-step video generation, on both the diffusers and SGLang engines.
 
 ## 🎬 Video Demos
 
@@ -21,6 +22,7 @@ We are excited to introduce **LingBot-Video**, the first open-source large-scale
 
 ## 🔥 Latest News
 
+- Sept 18, 2026: ⚡ We release the 8-step DMD student model for LingBot-Video.
 - Aug 5, 2026: 🎉 We release the RBench evaluation for LingBot-Video.
 - July 9, 2026: 🎉 We release the technical report, code, models, rewriters for LingBot-Video.
 
@@ -30,6 +32,7 @@ We are excited to introduce **LingBot-Video**, the first open-source large-scale
 | --- | --- | --- | --- |
 | ⚡ LingBot-Video-Dense | Dense (1.3B) | T2I, T2V, TI2V | 🤗 [Huggingface](https://huggingface.co/robbyant/lingbot-video-dense-1.3b) &nbsp; 🤖 [ModelScope](https://www.modelscope.cn/models/Robbyant/lingbot-video-dense-1.3b) |
 | 💪 LingBot-Video-MoE | MoE (30B-A3B) + Refiner | T2I, T2V, TI2V, Refinement | 🤗 [Huggingface](https://huggingface.co/robbyant/lingbot-video-moe-30b-a3b) &nbsp; 🤖 [ModelScope](https://www.modelscope.cn/models/Robbyant/lingbot-video-moe-30b-a3b) |
+| ⚡ LingBot-Video-MoE-DMD | MoE (30B-A3B), 8-step distilled student | T2V, TI2V | 🤗 [Huggingface](https://huggingface.co/robbyant/lingbot-video-moe-dmd-30b-a3b) &nbsp; 🤖 [ModelScope](https://www.modelscope.cn/models/Robbyant/lingbot-video-moe-dmd-30b-a3b) |
 | 📝 LingBot-Video-Rewriter-Base | Qwen3.6-27B official | Prompt rewriter (Expand) | 🤗 [Huggingface](https://huggingface.co/Qwen/Qwen3.6-27B) &nbsp; 🤖 [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3.6-27B) |
 | 📝 LingBot-Video-Rewriter-Adapter | Qwen3.6-27B LoRA | Prompt rewriter (Json) | 🤗 [Huggingface](https://huggingface.co/robbyant/lingbot-video-rewriter-lora) &nbsp; 🤖 [ModelScope](https://www.modelscope.cn/models/Robbyant/lingbot-video-rewriter-lora) |
 
@@ -89,6 +92,68 @@ Recommended runtime versions:
 | `safetensors` | `>=0.4.5` |
 
 ### 🎬 Inference
+
+#### ⚡ DMD: 8-step T2V and TI2V
+
+Use the **DMD-distilled MoE checkpoint** with `--scheduler dmd_student`,
+**8 steps**, **guidance scale 1.0**, and **shift 3.0**. The default examples
+produce **121 frames at 832 × 480 and 24 fps**, without a refiner.
+
+`MODEL_DIR` must be a downloaded **local model root**, containing
+`model_index.json`, `transformer/`, `text_encoder/`, `processor/`, `vae/`, and
+`scheduler/`. Its `transformer/` must contain the DMD student weights.
+A transformer-only export is not sufficient.
+
+Start with the structured prompts and matching first frame already bundled in
+this repository:
+
+```bash
+export MODEL_DIR="<path_to_lingbot-video-dmd>"
+
+# T2V: bundled structured prompt.
+bash scripts/single-gpu/run_moe_dmd_t2v.sh
+
+# TI2V: bundled structured prompt and its matching first-frame image.
+bash scripts/single-gpu/run_moe_dmd_ti2v.sh
+```
+
+The scripts accept `MODEL_DIR`, `PROMPT_JSON`, `IMAGE` (TI2V), `OUT_DIR`,
+`SEED`, `HEIGHT`, `WIDTH`, `BACKEND`, and `PYTHON_BIN` environment overrides.
+For example, to use your own prepared TI2V input:
+
+```bash
+MODEL_DIR="<path_to_lingbot-video-dmd>" \
+PROMPT_JSON="prompt.json" IMAGE="first_frame.png" OUT_DIR="outputs/dmd_ti2v" \
+  bash scripts/single-gpu/run_moe_dmd_ti2v.sh
+```
+
+Or call the unified runner directly:
+
+```bash
+python scripts/inference.py \
+  --backend diffusers --model_dir "$MODEL_DIR" \
+  --mode t2v --prompt_json assets/cases/t2v/example_1/prompt.json \
+  --output outputs/dmd_t2v.mp4 \
+  --scheduler dmd_student --steps 8 --guidance_scale 1 --shift 3 \
+  --height 480 --width 832 --duration 5 --num_frames 121 --fps 24 \
+  --seed 42 --transformer_dtype bf16 --text_encoder_dtype bf16 --vae_dtype fp32
+```
+
+For TI2V, replace the mode and prompt with `--mode ti2v
+--prompt_json assets/cases/ti2v/example_1/prompt.json` and add
+`--image assets/cases/ti2v/example_1/first_frame.png`.
+
+For new plain-language prompts, follow [Prompt Preparation](docs/en/prompt_preparation.md)
+and use the same first frame for rewriting and TI2V generation. At DMD guidance
+scale 1.0, the examples do not need an Auto Negative step. The existing ordinary
+MoE scripts use a different scheduler and guidance recipe; use the DMD scripts
+above for student checkpoints.
+
+The single-GPU 5-second examples were checked on a GPU with about 140 GiB of
+memory, using BF16 DiT/text encoder and FP32 VAE. Observed PyTorch peak allocated
+memory was about 82 GiB; this is not a minimum-memory specification. Start with
+the 5-second recipe. See the [DMD guide](docs/en/dmd_student_sampling.md) for
+sampling and precision details.
 
 #### 🧭 Recommended Inference Workflow
 

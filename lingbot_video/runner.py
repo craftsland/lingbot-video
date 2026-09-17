@@ -929,6 +929,7 @@ def _load_pipe(
     deferred_components: frozenset[str] = frozenset(),
     shared_components: dict[str, Any] | None = None,
     configure_vae_tiling: bool = True,
+    scheduler_name: str = "flow_unipc",
 ):
     model_dir = Path(args.model_dir).resolve()
     if args.engine == "diffusers":
@@ -940,15 +941,8 @@ def _load_pipe(
             deferred_components=deferred_components,
             shared_components=shared_components,
         )
-        if configure_vae_tiling:
-            _configure_vae_tiling(
-                pipe,
-                args.vae_tiling,
-                args.transformer_subfolder,
-                _vae_tiling_kwargs_from_args(args),
-            )
-        return pipe, "diffusers-reference"
-    if args.engine == "sglang-native":
+        engine_name = "diffusers-reference"
+    elif args.engine == "sglang-native":
         pipe = _load_sglang_native_pipe(
             model_dir,
             dtype_map,
@@ -957,15 +951,24 @@ def _load_pipe(
             deferred_components=deferred_components,
             shared_components=shared_components,
         )
-        if configure_vae_tiling:
-            _configure_vae_tiling(
-                pipe,
-                args.vae_tiling,
-                args.transformer_subfolder,
-                _vae_tiling_kwargs_from_args(args),
-            )
-        return pipe, "sglang-native"
-    raise ValueError(f"unsupported engine: {args.engine}")
+        engine_name = "sglang-native"
+    else:
+        raise ValueError(f"unsupported engine: {args.engine}")
+    if configure_vae_tiling:
+        _configure_vae_tiling(
+            pipe,
+            args.vae_tiling,
+            args.transformer_subfolder,
+            _vae_tiling_kwargs_from_args(args),
+        )
+    if scheduler_name == "dmd_student":
+        # Both engines denoise through the (possibly wrapped) diffusers
+        # pipeline loop, so the scheduler swap applies uniformly.
+        from lingbot_video.scheduling_dmd_student import DMDStudentScheduler
+
+        _inner_diffusers_pipe(pipe).scheduler = DMDStudentScheduler()
+        _log_progress("scheduler: DMDStudentScheduler (few-step distilled student)")
+    return pipe, engine_name
 
 
 def _refiner_model_available(
@@ -1216,6 +1219,16 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=40)
     parser.add_argument("--guidance_scale", type=float, default=3.0)
     parser.add_argument("--shift", type=float, default=3.0)
+    parser.add_argument(
+        "--scheduler",
+        choices=["flow_unipc", "dmd_student"],
+        default="flow_unipc",
+        help=(
+            "Sampling scheduler for the base model. Use dmd_student for "
+            "DMD-distilled few-step checkpoints (pair with --steps 8 "
+            "--guidance_scale 1.0); the refiner always keeps flow_unipc."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--fps", type=int, default=24)
     parser.add_argument("--default_dtype", default="bf16")
@@ -1426,6 +1439,7 @@ def main() -> None:
         args,
         dtype_map,
         deferred_components=deferred_components,
+        scheduler_name=args.scheduler,
     )
     _configure_pipeline_logs(pipe)
     component_dtypes = _component_dtypes(pipe)
@@ -1562,6 +1576,7 @@ def main() -> None:
             f"context_parallel_degree={args.context_parallel_degree} "
             f"height={args.height} width={args.width} frames={args.num_frames} steps={args.steps} "
             f"guidance={args.guidance_scale} shift={args.shift} seed={args.seed} "
+            f"scheduler={args.scheduler} "
             f"attn_backend={os.environ.get('DIFFUSERS_ATTN_BACKEND')} "
             f"allow_tf32={torch.backends.cuda.matmul.allow_tf32} "
             f"deterministic_algorithms={torch.are_deterministic_algorithms_enabled()} "
